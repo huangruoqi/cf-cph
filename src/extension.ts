@@ -26,7 +26,6 @@ globalThis.logger.debug = (...args: any[]) =>
 /************************************************************************************/
 
 import * as vscode from 'vscode';
-import { setupCompanionServer } from './companion';
 import runTestCases from './runTestCases';
 import {
     editorChanged,
@@ -113,7 +112,6 @@ export function activate(context: vscode.ExtensionContext) {
     statusBarItem.command = 'cph.runTestCases';
 
     registerCommands(context);
-    setupCompanionServer();
     checkLaunchWebview();
 
     vscode.workspace.onDidCloseTextDocument((e) => {

@@ -472,40 +472,6 @@ function Judge(props: {
         setInfoPageVisible(true);
     };
 
-    const renderDonateButton = () => {
-        const diff = new Date().getTime() - webviewState.dialogCloseDate;
-        const diffInDays = diff / (1000 * 60 * 60 * 24);
-        if (diffInDays < 14) {
-            return null;
-        }
-
-        return (
-            <div className="donate-box">
-                <a
-                    href="javascript:void(0)"
-                    className="right"
-                    title="Close dialog"
-                    onClick={() => closeDonateBox()}
-                >
-                    <i className="codicon codicon-close"></i>
-                </a>
-                <h1>🌸</h1>
-                <h3>If you find CPH useful, please consider supporting.</h3>
-                <p>
-                    Your contribution helps support continued development of
-                    CPH. CPH is free and open source, thanks to your support.
-                </p>
-                <a
-                    href={payPalUrl}
-                    className="btn btn-pink"
-                    title="Open donation page"
-                >
-                    <i className="codicon codicon-heart-filled"></i> Donate
-                </a>
-            </div>
-        );
-    };
-
     const renderInfoPage = () => {
         if (infoPageVisible === false) {
             return null;
@@ -586,7 +552,6 @@ function Judge(props: {
     return (
         <div className="ui">
             {notification && <div className="notification">{notification}</div>}
-            {renderDonateButton()}
             {renderInfoPage()}
             <div className="meta">
                 <h1 className="problem-name">
@@ -614,44 +579,6 @@ function Judge(props: {
                     {renderSubmitButton()}
                 </div>
 
-                <br />
-                <span onClick={toggleOnlineJudgeEnv}>
-                    <input
-                        type="checkbox"
-                        className="oj"
-                        checked={onlineJudgeEnv}
-                    />
-                    <span>
-                        Set <code>ONLINE_JUDGE</code>
-                    </span>
-                </span>
-                <br />
-                <br />
-                <div>
-                    <small>
-                        <a
-                            href={payPalUrl}
-                            className="btn btn-pink"
-                            title="Donate"
-                        >
-                            <i className="codicon codicon-heart-filled"></i>{' '}
-                            Support
-                        </a>
-                    </small>
-                    <small>
-                        <a href="https://rb.gy/vw82u5" className="btn">
-                            <i className="codicon codicon-feedback"></i>{' '}
-                            Feedback
-                        </a>
-                    </small>
-                </div>
-                <div className="remote-message">
-                    <p
-                        dangerouslySetInnerHTML={{
-                            __html: window.remoteMessage || '',
-                        }}
-                    />
-                </div>
                 {window.showLiveUserCount && liveUserCount > 0 && (
                     <div className="liveUserCount">
                         <i className="codicon codicon-circle-filled color-green"></i>{' '}
@@ -827,42 +754,7 @@ function App() {
         };
     }, [cases]);
 
-    const createProblem = () => {
-        vscodeApi.postMessage({
-            command: 'create-local-problem',
-        });
-    };
-
-    if (problem === undefined && showFallback) {
-        return (
-            <>
-                <div className={`ui p10 fallback`}>
-                    <div className="text-center">
-                        <p>
-                            This document does not have a CPH problem associated
-                            with it.
-                        </p>
-                        <br />
-                        <div className="btn btn-block" onClick={createProblem}>
-                            <span className="icon">
-                                <i className="codicon codicon-add"></i>
-                            </span>{' '}
-                            Create Problem
-                        </div>
-                        <a
-                            className="btn btn-block btn-green"
-                            href="https://github.com/agrawal-d/cph/blob/main/docs/user-guide.md"
-                        >
-                            <span className="icon">
-                                <i className="codicon codicon-question"></i>
-                            </span>{' '}
-                            How to use this extension
-                        </a>
-                    </div>
-                </div>
-            </>
-        );
-    } else if (problem !== undefined) {
+    if (problem !== undefined) {
         return (
             <Judge
                 problem={problem}
