@@ -12,6 +12,7 @@ export default function CaseView(props: {
     notify: (text: string) => void;
     doFocus?: boolean;
     forceRunning: boolean;
+    deletable: boolean;
 }) {
     const { id, result } = props.case;
 
@@ -22,6 +23,7 @@ export default function CaseView(props: {
         props.case.result?.pass === true,
     );
     const inputBox = createRef<HTMLTextAreaElement>();
+    const deletable = props.deletable;
 
     useEffect(() => {
         if (props.doFocus) {
@@ -165,6 +167,7 @@ export default function CaseView(props: {
                             <i className="codicon codicon-play"></i>
                         </span>{' '}
                     </button>
+                    {deletable?
                     <button
                         className="btn btn-red"
                         title="Delete Testcase"
@@ -176,6 +179,8 @@ export default function CaseView(props: {
                             <i className="codicon codicon-trash"></i>
                         </span>{' '}
                     </button>
+                    :null
+                    }
                 </div>
             </div>
             {!minimized && (

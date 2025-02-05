@@ -67,6 +67,7 @@ const createLocalProblem = async (editor: vscode.TextEditor) => {
                 id: randomId(),
                 input: '',
                 output: '',
+                original: false,
             },
         ],
         interactive: false,

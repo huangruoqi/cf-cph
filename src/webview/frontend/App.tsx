@@ -90,10 +90,7 @@ function Judge(props: {
     const [notification, setNotification] = useState<string | null>(null);
     const [waitingForSubmit, setWaitingForSubmit] = useState<boolean>(false);
     const [onlineJudgeEnv, setOnlineJudgeEnv] = useState<boolean>(false);
-    const [infoPageVisible, setInfoPageVisible] = useState<boolean>(false);
-    const [generatedJson, setGeneratedJson] = useState<any | null>(null);
     const [liveUserCount, setLiveUserCount] = useState<number>(0);
-    const [extLogs, setExtLogs] = useState<string>('');
 
     useEffect(() => {
         const updateLiveUserCount = (): void => {
@@ -104,15 +101,6 @@ function Judge(props: {
         updateLiveUserCount();
         const interval = setInterval(updateLiveUserCount, 30000);
         return () => clearInterval(interval);
-    }, []);
-
-    useEffect(() => {
-        fetch(window.generatedJsonUri)
-            .then((res) => res.json())
-            .then((data) => setGeneratedJson(data))
-            .catch((err) =>
-                console.error('Failed to fetch generated JSON', err),
-            );
     }, []);
 
     const [webviewState, setWebviewState] = useState<WebViewpersistenceState>(
@@ -138,15 +126,6 @@ function Judge(props: {
             tests: testCases,
         });
     }, [cases]);
-
-    const closeDonateBox = () => {
-        const newState = {
-            ...webviewState,
-            dialogCloseDate: Date.now(),
-        };
-        setWebviewState(newState);
-        vscodeApi.setState(newState);
-    };
 
     const sendMessageToVSCode = (message: WebviewToVSEvent) => {
         vscodeApi.postMessage(message);
@@ -191,7 +170,6 @@ function Judge(props: {
                     break;
                 }
                 case 'ext-logs': {
-                    setExtLogs(data.logs);
                     break;
                 }
                 default: {
@@ -248,6 +226,7 @@ function Judge(props: {
             id,
             input: '',
             output: '',
+            original: false,
         };
         updateCases([
             ...cases,
@@ -265,14 +244,6 @@ function Judge(props: {
         notify('Stopped any running processes');
         sendMessageToVSCode({
             command: 'kill-running',
-            problem,
-        });
-    };
-
-    // Deletes the .prob file and closes webview
-    const deleteTcs = () => {
-        sendMessageToVSCode({
-            command: 'delete-tcs',
             problem,
         });
     };
@@ -323,15 +294,6 @@ function Judge(props: {
         return false;
     };
 
-    const toggleOnlineJudgeEnv = () => {
-        const newEnv = !onlineJudgeEnv;
-        setOnlineJudgeEnv(newEnv);
-        sendMessageToVSCode({
-            command: 'online-judge-env',
-            value: newEnv,
-        });
-    };
-
     const updateCase = (id: number, input: string, output: string) => {
         const newCases: Case[] = cases.map((testCase) => {
             if (testCase.id === id) {
@@ -342,6 +304,7 @@ function Judge(props: {
                         id,
                         input,
                         output,
+                        original: testCase.testcase.original,
                     },
                 };
             } else {
@@ -374,6 +337,7 @@ function Judge(props: {
                     doFocus={true}
                     forceRunning={getRunningProp(value)}
                     updateCase={updateCase}
+                    deletable={!value.testcase.original}
                 ></CaseView>,
             );
             debounceFocusLast();
@@ -388,6 +352,7 @@ function Judge(props: {
                     remove={remove}
                     forceRunning={getRunningProp(value)}
                     updateCase={updateCase}
+                    deletable={!value.testcase.original}
                 ></CaseView>,
             );
         }
@@ -465,94 +430,9 @@ function Judge(props: {
         }
     };
 
-    const showInfoPage = () => {
-        sendMessageToVSCode({
-            command: 'get-ext-logs',
-        });
-        setInfoPageVisible(true);
-    };
-
-    const renderInfoPage = () => {
-        if (infoPageVisible === false) {
-            return null;
-        }
-
-        if (generatedJson === null) {
-            return (
-                <Page
-                    content="Loading..."
-                    title="About CPH"
-                    closePage={() => setInfoPageVisible(false)}
-                />
-            );
-        }
-        const logs = storedLogs;
-        const contents = (
-            <div>
-                A VS Code extension to make competitive programming easier,
-                created by Divyanshu Agrawal
-                <hr />
-                <h3>🤖 Enable AI compilation</h3>
-                Get 100x faster compilation using AI, please opt-in below. Your
-                data will be used to train cats to write JavaScript.
-                <br />
-                <br />
-                <button
-                    className="btn btn-green"
-                    onClick={(e) => {
-                        const target = e.target as HTMLButtonElement;
-                        target.innerText = '🪄 AI training ...';
-                    }}
-                >
-                    Enable
-                </button>
-                <hr />
-                <h3>Get Help</h3>
-                <a
-                    className="btn"
-                    href="https://github.com/agrawal-d/cph/blob/main/docs/user-guide.md"
-                >
-                    User guide
-                </a>
-                <hr />
-                <h3>Commit</h3>
-                <pre className="selectable">{generatedJson.gitCommitHash}</pre>
-                <hr />
-                <h3>Build Time</h3>
-                {generatedJson.dateTime}
-                <hr />
-                <h3>License</h3>
-                <pre className="selectable">{generatedJson.licenseString}</pre>
-                <hr />
-                {window.showLiveUserCount && (
-                    <>
-                        <h3>Live user count</h3>
-                        {liveUserCount} {liveUserCount === 1 ? 'user' : 'users'}{' '}
-                        online.
-                        <hr />
-                    </>
-                )}
-                <h3>UI Logs</h3>
-                <pre className="selectable">{logs}</pre>
-                <hr />
-                <h3>Extension Logs</h3>
-                <pre className="selectable">{extLogs}</pre>
-            </div>
-        );
-
-        return (
-            <Page
-                content={contents}
-                title="About CPH"
-                closePage={() => setInfoPageVisible(false)}
-            />
-        );
-    };
-
     return (
         <div className="ui">
             {notification && <div className="notification">{notification}</div>}
-            {renderInfoPage()}
             <div className="meta">
                 <h1 className="problem-name">
                     <a href={getHref()}>{problem.name}</a>{' '}
@@ -599,16 +479,6 @@ function Judge(props: {
                         </span>{' '}
                         <span className="action-text">Run All</span>
                     </button>
-                    <button
-                        className="btn btn-green"
-                        onClick={newCase}
-                        title="Create a new empty testcase"
-                    >
-                        <span className="icon">
-                            <i className="codicon codicon-add"></i>
-                        </span>{' '}
-                        <span className="action-text">New</span>
-                    </button>
                 </div>
                 <div className="row">
                     <button
@@ -620,26 +490,6 @@ function Judge(props: {
                             <i className="codicon codicon-circle-slash"></i>
                         </span>{' '}
                         <span className="action-text">Stop</span>
-                    </button>
-                    <button
-                        className="btn"
-                        title="Info"
-                        onClick={() => showInfoPage()}
-                    >
-                        <span className="icon">
-                            <i className="codicon codicon-info"></i>
-                        </span>{' '}
-                        <span className="action-text"></span>
-                    </button>
-                    <button
-                        className="btn btn-red right"
-                        onClick={deleteTcs}
-                        title="Delete all testcases and close results window"
-                    >
-                        <span className="icon">
-                            <i className="codicon codicon-trash"></i>
-                        </span>{' '}
-                        <span className="action-text">Delete</span>
                     </button>
                 </div>
             </div>
@@ -688,7 +538,6 @@ function App() {
     const [cases, setCases] = useState<Case[]>([]);
     const [deferSaveTimer, setDeferSaveTimer] = useState<number | null>(null);
     const [, setSaving] = useState<boolean>(false);
-    const [showFallback, setShowFallback] = useState<boolean>(false);
 
     // Save the problem
     const save = () => {
@@ -734,10 +583,6 @@ function App() {
             const data: VSToWebViewMessage = event.data;
             switch (data.command) {
                 case 'new-problem': {
-                    if (data.problem === undefined) {
-                        setShowFallback(true);
-                    }
-
                     setProblem(data.problem);
                     setCases(getCasesFromProblem(data.problem));
                     break;

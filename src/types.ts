@@ -73,6 +73,7 @@ export type TestCase = {
     input: string;
     output: string;
     id: number;
+    original: boolean;
 };
 
 export type Problem = {

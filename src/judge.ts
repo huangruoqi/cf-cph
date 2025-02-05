@@ -47,6 +47,7 @@ export const getBlankCase = (_problem: Problem): Case => {
             input: '',
             output: '',
             id,
+            original: false,
         },
     };
 };
