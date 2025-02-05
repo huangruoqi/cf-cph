@@ -49,7 +49,7 @@
         ],
         "keybindings": [
             {
-                "key": "ctrl+alt+b",
+                "key": "ctrl+alt+enter",
                 "command": "cph.runTestCases"
             },
             {
