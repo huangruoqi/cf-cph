@@ -9,7 +9,13 @@ import { getJudgeViewProvider } from '../extension';
  * Run every testcase in a problem one by one. Waits for the first to complete
  * before running next. `runSingleAndSave` takes care of saving.
  **/
+let isRunning = false;
 export default async (problem: Problem) => {
+    if (isRunning) {
+        globalThis.logger.log('Run all has started', problem);
+        return;
+    }
+    isRunning = true;
     globalThis.logger.log('Run all started', problem);
     const didCompile = await compileFile(problem.srcPath);
     if (!didCompile) {
@@ -28,4 +34,5 @@ export default async (problem: Problem) => {
         getLanguage(problem.srcPath),
         getBinSaveLocation(problem.srcPath),
     );
+    isRunning = false;
 };

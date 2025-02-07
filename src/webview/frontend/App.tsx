@@ -178,8 +178,14 @@ function Judge(props: {
             }
         };
         window.addEventListener('message', fn);
+        // this is a bit annoying, maybe another 
+        // command to show only red/green indication
+        const ii = setInterval(() => {
+            runAll();
+        }, 3000)
         return () => {
             window.removeEventListener('message', fn);
+            clearInterval(ii);
         };
     }, []);
 
