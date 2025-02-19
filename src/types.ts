@@ -121,6 +121,19 @@ export type RunAllCommand = {
     command: 'run-all-and-save';
 } & WebviewMessageCommon;
 
+export type StatusYayCommand = {
+    command: 'status-yay';
+};
+
+export type StatusNayCommand = {
+    command: 'status-nay';
+};
+
+
+export type RunAllStatusCommand = {
+    command: 'run-all-status';
+} & WebviewMessageCommon;
+
 export type OnlineJudgeEnv = {
     command: 'online-judge-env';
     value: boolean;
@@ -165,6 +178,7 @@ export type GetExtLogs = {
 
 export type WebviewToVSEvent =
     | RunAllCommand
+    | RunAllStatusCommand
     | GetInitialProblem
     | CreateLocalProblem
     | RunSingleCommand
@@ -235,6 +249,8 @@ export type VSToWebViewMessage =
     | WaitingForSubmitCommand
     | SubmitFinishedCommand
     | NotRunningCommand
+    | StatusYayCommand
+    | StatusNayCommand
     | RemoteMessageCommand
     | NewProblemCommand
     | ExtLogsCommand;

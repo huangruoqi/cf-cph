@@ -11,7 +11,6 @@ import {
     WebViewpersistenceState,
 } from '../../types';
 import CaseView from './CaseView';
-import Page from './Page';
 
 let storedLogs = '';
 let notificationTimeout: NodeJS.Timeout | undefined = undefined;
@@ -51,9 +50,6 @@ window.console.warn = customLogger.bind(window.console, originalConsole.warn);
 window.console.info = customLogger.bind(window.console, originalConsole.info);
 window.console.debug = customLogger.bind(window.console, originalConsole.debug);
 
-// Original: www.paypal.com/ncp/payment/CMLKCFEJEMX5L
-const payPalUrl = 'https://rb.gy/5iiorz';
-
 function getLiveUserCount(): Promise<number> {
     console.log('Fetching live user count');
     return fetch(window.remoteServerAddress)
@@ -87,6 +83,7 @@ function Judge(props: {
     const [focusLast, setFocusLast] = useState<boolean>(false);
     const [forceRunning, setForceRunning] = useState<number | false>(false);
     const [compiling, setCompiling] = useState<boolean>(false);
+    const [status, setStatus] = useState<boolean>(false);
     const [notification, setNotification] = useState<string | null>(null);
     const [waitingForSubmit, setWaitingForSubmit] = useState<boolean>(false);
     const [onlineJudgeEnv, setOnlineJudgeEnv] = useState<boolean>(false);
@@ -172,6 +169,14 @@ function Judge(props: {
                 case 'ext-logs': {
                     break;
                 }
+                case 'status-yay': {
+                    setStatus(true);
+                    break;
+                }
+                case 'status-nay': {
+                    setStatus(false);
+                    break;
+                }
                 default: {
                     console.log('Invalid event', event.data);
                 }
@@ -181,8 +186,8 @@ function Judge(props: {
         // this is a bit annoying, maybe another 
         // command to show only red/green indication
         const ii = setInterval(() => {
-            runAll();
-        }, 3000)
+            runAllStatus();
+        }, 500)
         return () => {
             window.removeEventListener('message', fn);
             clearInterval(ii);
@@ -258,6 +263,14 @@ function Judge(props: {
         refreshOnlineJudge();
         sendMessageToVSCode({
             command: 'run-all-and-save',
+            problem,
+        });
+    };
+
+    const runAllStatus = () => {
+        refreshOnlineJudge();
+        sendMessageToVSCode({
+            command: 'run-all-status',
             problem,
         });
     };
@@ -447,6 +460,7 @@ function Judge(props: {
                             <span className="loader"></span>
                         </b>
                     )}
+                    <div style={{backgroundColor: status ? 'rgb(66, 153, 66)' : 'rgb(204, 59, 59)'}} className="problem-status"></div>
                 </h1>
             </div>
             <div className="results">{views}</div>

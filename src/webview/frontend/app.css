@@ -346,6 +346,15 @@ button:disabled {
     font-size: 18px;
     margin: 5px;
     padding: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.problem-status {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
 }
 
 .case {

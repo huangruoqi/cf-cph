@@ -1,6 +1,7 @@
 export default {
     RUN_TESTCASE: 'run-testcase',
     RUN_ALL_TESTCASES: 'run-all-testcases',
+    RUN_ALL_STATUS: 'run-all-status',
     SUBMIT_TO_CODEFORCES: 'submit-to-codeforces',
     SUBMIT_TO_KATTIS: 'submit-to-kattis',
     GET_PROBLEM_FROM_COMPANION: 'get-problem-from-companion',

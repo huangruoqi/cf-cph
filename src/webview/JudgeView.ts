@@ -14,6 +14,7 @@ import {
     getRetainWebviewContextPref,
 } from '../preferences';
 import { setOnlineJudgeEnv } from '../compiler';
+import runAllStatus from './processRunAllStatus';
 
 class JudgeViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'cph.judgeView';
@@ -53,6 +54,12 @@ class JudgeViewProvider implements vscode.WebviewViewProvider {
                     case 'run-all-and-save': {
                         const problem = message.problem;
                         runAllAndSave(problem);
+                        break;
+                    }
+
+                    case 'run-all-status': {
+                        const problem = message.problem;
+                        runAllStatus(problem);
                         break;
                     }
 
