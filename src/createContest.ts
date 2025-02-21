@@ -6,15 +6,50 @@ import { Problem } from './types';
 import { DEFAULT_MEMORY_LIMIT, DEFAULT_TIME_LIMIT, ILLEGAL_CHARS, TEMPLATE } from './constants';
 import { saveProblem } from './parser';
 
+export function closeAllFiles() {
+    vscode.commands.executeCommand('workbench.action.closeAllEditors');
+}
 
-const parseHTML = async (url: string) => {
-    const response = await fetch(url);
-    const text = await response.text();
-    return cheerio.load(text);
+async function openFileLocked(filePath: string) {
+    try {
+        const uri = vscode.Uri.file(filePath); // Convert to a URI
+        const document = await vscode.workspace.openTextDocument(uri); // Open the file
+        await vscode.window.showTextDocument(document, { preview: false }); // Lock tab
+    } catch (error) {
+        vscode.window.showErrorMessage(`Error opening file: ${error}`);
+    }
+}
+
+const parseHTML = async (url: string, referrer: string) => {
+    const response = await fetch(url, {
+        "headers": {
+            "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+            "sec-ch-ua-arch": "\"arm\"",
+            "sec-ch-ua-bitness": "\"64\"",
+            "sec-ch-ua-full-version": "\"131.0.6778.265\"",
+            "sec-ch-ua-full-version-list": "\"Google Chrome\";v=\"131.0.6778.265\", \"Chromium\";v=\"131.0.6778.265\", \"Not_A Brand\";v=\"24.0.0.0\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-model": "\"\"",
+            "sec-ch-ua-platform": "\"macOS\"",
+            "sec-ch-ua-platform-version": "\"15.2.0\"",
+            "upgrade-insecure-requests": "1"
+        },
+        "referrer": referrer,
+        "referrerPolicy": "strict-origin-when-cross-origin",
+        "body": null,
+        "method": "GET",
+        "mode": "cors",
+        "credentials": "omit"
+    });
+    if (response.ok) {
+        const text = await response.text();
+        return cheerio.load(text);
+    }
+    throw Error("Failed to fetch " + url);
 };
 
 function getLAFmtTime() {
-    const now = new Date().toLocaleString("en-US", { 
+    const now = new Date().toLocaleString("en-US", {
         timeZone: "America/Los_Angeles",
         hour12: false // 24-hour format; change to true for AM/PM
     });
@@ -48,8 +83,8 @@ function wait(ms: number) {
 }
 
 async function getContestInfo(contestId: string) {
-    const url = `https://codeforces.com/contest/${contestId}?locale=en`;
-    const $ = await parseHTML(url);
+    const url = `https://codeforces.com/contest/${contestId}`;
+    const $ = await parseHTML(url, url);
     const result: Record<string, string> = {};
     const contestName = $(".rtable a").first().text().trim();
     $('.problems tr').slice(1).each((_, element) => {
@@ -61,8 +96,9 @@ async function getContestInfo(contestId: string) {
 }
 
 async function getProblemInfo(contestId: string, problem: string, name: string) {
-    const url = `https://codeforces.com/contest/${contestId}/problem/${problem}?locale=en`
-    const $ = await parseHTML(url);
+    const url = `https://codeforces.com/contest/${contestId}/problem/${problem}`
+    const rurl = `https://codeforces.com/contest/${contestId}`;
+    const $ = await parseHTML(url, rurl);
     const result: Problem = {
         name: name,
         url: url,
@@ -116,14 +152,21 @@ async function getProblemInfo(contestId: string, problem: string, name: string) 
     return result;
 }
 
-async function createContestFolder(contestId: string, name: string, result: Record<string, string>) {
+function getWorkspacePath() {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders) {
         vscode.window.showErrorMessage("No workspace folder is open.");
         return;
     }
 
-    const workspacePath = workspaceFolders[0].uri.fsPath;
+    return workspaceFolders[0].uri.fsPath;
+}
+
+async function createContestFolder(contestId: string, name: string, result: Record<string, string>) {
+    const workspacePath = getWorkspacePath();
+    if (workspacePath === undefined) {
+        return;
+    }
     const safeContestName = name.replace(ILLEGAL_CHARS, '');
     const contestPath = path.join(workspacePath, safeContestName);
 
@@ -142,7 +185,7 @@ async function createContestFolder(contestId: string, name: string, result: Reco
     const keys = Array.from(Object.keys(result));
     const timeString = getLAFmtTime();
     for (let i = 0; i < keys.length; i++) {
-        await wait(500); // wait half second before querying the next problem
+        await wait(1000);
         const problemPath = path.join(contestPath, `${keys[i]}.py`);
         fs.writeFileSync(
             problemPath,
@@ -157,7 +200,7 @@ async function createContestFolder(contestId: string, name: string, result: Reco
         saveProblem(problemPath, problem);
         vscode.window.showInformationMessage(`Problem <${problemName}> created`);
     }
-    await wait(500);
+    await wait(100);
 }
 
 export async function createContest() {
@@ -165,7 +208,24 @@ export async function createContest() {
     if (contestId && contestId.trim()) {
         try {
             const { name, result } = await getContestInfo(contestId);
+            const workspacePath = getWorkspacePath();
+            if (workspacePath === undefined) {
+                return;
+            }
+            const safeContestName = name.replace(ILLEGAL_CHARS, '');
+            const contestPath = path.join(workspacePath, safeContestName);
+            closeAllFiles();
             await createContestFolder(contestId, name, result);
+            const paths = [];
+            for (let key of Object.keys(result)) {
+                paths.push(path.join(contestPath, `${key}.py`));
+            }
+            const promises = [];
+            for (let i = 0; i < paths.length; i++) {
+                promises.push(openFileLocked(paths[i]));
+            }
+            await Promise.all(promises);
+            openFileLocked(paths[0]);
             vscode.window.showInformationMessage(`Contest <${name}> initialized`);
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to fetch contest data: ${error}`);
