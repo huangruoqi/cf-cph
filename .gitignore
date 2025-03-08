@@ -129,3 +129,4 @@ dist
 releases/
 **/*.vsix
 src/secrets.ts
+.DS_Store

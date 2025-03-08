@@ -1,11 +1,11 @@
 {
-    "name": "competitive-programming-helper",
-    "displayName": "Competitive Programming Helper (cph)",
+    "name": "cf-cph",
+    "displayName": "Competitive Programming Helper (Codeforces)",
     "description": "Makes judging, compiling, and downloading problems for competitve programming easy. Also supports auto-submit for a few sites.",
     "license": "GPL-3.0-or-later",
     "icon": "icon.png",
-    "publisher": "DivyanshuAgrawal",
-    "version": "2077.0.0",
+    "publisher": "Ruoqi",
+    "version": "2078.0.2",
     "engines": {
         "vscode": "^1.52.0"
     },
@@ -377,10 +377,11 @@
     "scripts": {
         "webpack-production": "webpack --mode production",
         "webpack-frontend-production": "webpack --mode production --config ./webpack.frontend.config.js",
-        "vscode:prepublish": "npm run webpack-frontend-production && npm run webpack-production",
+        "vscode:prepublish": "npm run webpack && npm run webpack-frontend-dev-build",
         "prewebpack": "webpack --mode development --config ./webpack.frontend.config.js",
         "webpack": "webpack --mode development",
         "webpack-dev": "webpack --mode development --watch",
+        "webpack-frontend-dev-build": "webpack --mode development --config ./webpack.frontend.config.js",
         "webpack-frontend-dev": "webpack --mode development --watch --config ./webpack.frontend.config.js",
         "test-compile": "tsc -p ./",
         "lint": "eslint . --ext .ts,.tsx",
