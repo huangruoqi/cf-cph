@@ -38,6 +38,7 @@ import { getRetainWebviewContextPref } from './preferences';
 import TelemetryReporter from '@vscode/extension-telemetry';
 import config from './config';
 import { createContest } from './createContest';
+import { setupCompanionServer } from './companion';
 
 let judgeViewProvider: JudgeViewProvider;
 
@@ -73,12 +74,9 @@ const registerCommands = (context: vscode.ExtensionContext) => {
             submitToKattis();
         },
     );
-    const disposable5 = vscode.commands.registerCommand(
-        'cph.create',
-        () => {
-            createContest();
-        },
-    );
+    const disposable5 = vscode.commands.registerCommand('cph.create', () => {
+        createContest();
+    });
 
     judgeViewProvider = new JudgeViewProvider(context.extensionUri);
 
@@ -121,6 +119,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     registerCommands(context);
     checkLaunchWebview();
+
+    // Setup companion server for Competitive Companion integration
+    globalThis.logger.log('Setting up companion server...');
+    setupCompanionServer();
+    globalThis.logger.log('Companion server setup complete');
 
     vscode.workspace.onDidCloseTextDocument((e) => {
         editorClosed(e);

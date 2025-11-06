@@ -1,10 +1,19 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as cheerio from 'cheerio';
 import { Problem } from './types';
-import { DEFAULT_MEMORY_LIMIT, DEFAULT_TIME_LIMIT, ILLEGAL_CHARS, TEMPLATE } from './constants';
+import {
+    DEFAULT_MEMORY_LIMIT,
+    DEFAULT_TIME_LIMIT,
+    ILLEGAL_CHARS,
+    TEMPLATE,
+} from './constants';
 import { saveProblem } from './parser';
+import {
+    startContestProblemCollection,
+    stopContestProblemCollection,
+    setProcessingContest,
+} from './companion';
 
 export function closeAllFiles() {
     vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -20,52 +29,16 @@ async function openFileLocked(filePath: string) {
     }
 }
 
-const parseHTML = async (url: string) => {
-    const response = await fetch(url, {
-        headers: {
-            "Accept": "text/html",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", // Pretend browser to avoid blocks
-        },
-    });
-    if (!response.ok) {
-        throw new Error(`Failed to fetch: ${response.statusText}`);
-    }
-    const text = await response.text();
-    return cheerio.load(text);
-};
-
 function getLAFmtTime() {
-    const now = new Date().toLocaleString("en-US", {
-        timeZone: "America/Los_Angeles",
-        hour12: false
+    const now = new Date().toLocaleString('en-US', {
+        timeZone: 'America/Los_Angeles',
+        hour12: false,
     });
     return now;
 }
 
-const parseMiliseconds = (time: string) => {
-    const words = time.split(' ');
-    if (words.length < 2) {
-        return DEFAULT_TIME_LIMIT;
-    }
-    if (['seconds', 'second'].includes(words[1])) {
-        return Math.floor(parseFloat(words[0]) * 1000);
-    }
-    return DEFAULT_TIME_LIMIT;
-};
-
-const parseMegabytes = (memory: string) => {
-    const words = memory.split(' ');
-    if (words.length < 2) {
-        return DEFAULT_MEMORY_LIMIT;
-    }
-    if (['megabytes', 'megabyte'].includes(words[1])) {
-        return Math.floor(parseFloat(words[0]));
-    }
-    return DEFAULT_MEMORY_LIMIT;
-};
-
 function wait(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -79,7 +52,7 @@ async function getContestInfo(contestId: string) {
     }
 
     const data = await response.json();
-    if (data.status !== "OK") {
+    if (data.status !== 'OK') {
         throw new Error(`Codeforces API error: ${data.comment}`);
     }
 
@@ -95,63 +68,53 @@ async function getContestInfo(contestId: string) {
 }
 
 /**
- * Fetch and parse a problem page to extract test cases and limits.
+ * Convert Competitive Companion problem format to our Problem format
  */
-async function getProblemInfo(contestId: string, problem: string, name: string) {
-    const url = `https://codeforces.com/contest/${contestId}/problem/${problem}`;
-    const $ = await parseHTML(url);
+function convertCompanionProblem(companionProblem: any): Problem {
+    globalThis.logger.log(
+        '[Convert Problem] Converting Competitive Companion problem:',
+        companionProblem.name,
+    );
+    globalThis.logger.log(
+        '[Convert Problem] Companion data:',
+        JSON.stringify(companionProblem, null, 2),
+    );
+
+    // Map test cases from Competitive Companion format
+    const tests = (companionProblem.tests || []).map(
+        (test: any, index: number) => {
+            globalThis.logger.log(
+                `[Convert Problem] Test case ${index + 1}: input length=${
+                    test.input?.length || 0
+                }, output length=${test.output?.length || 0}`,
+            );
+            return {
+                input: test.input || '',
+                output: test.output || '',
+                id: index,
+                original: true,
+            };
+        },
+    );
+
     const result: Problem = {
-        name: name,
-        url: url,
-        interactive: false,
-        memoryLimit: parseMegabytes($('.memory-limit').first().text()),
-        timeLimit: parseMiliseconds($('.time-limit').first().text()),
-        group: 'local',
-        tests: [],
-        srcPath: ''
+        name: companionProblem.name || '',
+        url: companionProblem.url || '',
+        interactive: companionProblem.interactive || false,
+        memoryLimit: companionProblem.memoryLimit || DEFAULT_MEMORY_LIMIT,
+        timeLimit: companionProblem.timeLimit || DEFAULT_TIME_LIMIT,
+        group: companionProblem.group || 'local',
+        tests: tests,
+        srcPath: '',
     };
 
-    const inputList: string[] = [];
-    const outputList: string[] = [];
-
-    // Extract inputs
-    $(".input").each((_, a) => {
-        const w = $(a).find(".test-example-line");
-        if (w.length) {
-            let ss: string[] = [];
-            w.each((_, b) => {
-                ss.push($(b).text(), "\n");
-            });
-            inputList.push(ss.join(""));
-        } else {
-            const w = $(a).find("pre").first();
-            if (w.length) {
-                const s = w.html()
-                    ?.replace(/<br\s*\/?>/g, "\n")
-                    .replace(/<\/?pre>/g, "")
-                    .trim();
-                inputList.push(s as string);
-            }
-        }
-    });
-
-    // Extract outputs
-    $(".output").each((_, a) => {
-        $(a).find("pre").each((_, b) => {
-            const s = $(b).html()
-                ?.replace(/<br\s*\/?>/g, "\n")
-                .replace(/<\/?pre>/g, "")
-                .trim();
-            outputList.push(s as string);
-        });
-    });
-
-    result.tests = inputList.map((input, i) => ({
-        input,
-        output: outputList[i],
-        id: i,
-        original: true,
-    }));
+    globalThis.logger.log(
+        `[Convert Problem] Converted problem: ${result.name} with ${result.tests.length} test cases`,
+    );
+    globalThis.logger.log(
+        '[Convert Problem] Result:',
+        JSON.stringify(result, null, 2),
+    );
 
     return result;
 }
@@ -159,13 +122,18 @@ async function getProblemInfo(contestId: string, problem: string, name: string) 
 function getWorkspacePath() {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders) {
-        vscode.window.showErrorMessage("No workspace folder is open.");
+        vscode.window.showErrorMessage('No workspace folder is open.');
         return;
     }
     return workspaceFolders[0].uri.fsPath;
 }
 
-async function createContestFolder(contestId: string, name: string, result: Record<string, string>) {
+async function createContestFolderFromCompanion(
+    _contestId: string,
+    name: string,
+    problems: Problem[],
+    _problemIndices: Record<string, string>,
+) {
     const workspacePath = getWorkspacePath();
     if (workspacePath === undefined) {
         return;
@@ -174,64 +142,260 @@ async function createContestFolder(contestId: string, name: string, result: Reco
     const contestPath = path.join(workspacePath, safeContestName);
 
     if (fs.existsSync(contestPath)) {
-        vscode.window.showErrorMessage(`Contest folder already exists: ${contestPath}`);
-        const res = await vscode.window.showInputBox({ prompt: 'Enter `yes` to reinitialize...' });
+        vscode.window.showErrorMessage(
+            `Contest folder already exists: ${contestPath}`,
+        );
+        const res = await vscode.window.showInputBox({
+            prompt: 'Enter `yes` to reinitialize...',
+        });
         if (res !== 'yes') {
             return;
         }
         fs.rmdirSync(contestPath, { recursive: true });
     }
 
-    vscode.window.showInformationMessage(`Creating <${safeContestName}> folder`);
+    vscode.window.showInformationMessage(
+        `Creating <${safeContestName}> folder`,
+    );
     fs.mkdirSync(contestPath, { recursive: true });
 
-    const keys = Array.from(Object.keys(result));
     const timeString = getLAFmtTime();
-    for (let i = 0; i < keys.length; i++) {
-        await wait(1000);
-        const problemPath = path.join(contestPath, `${keys[i]}.py`);
+
+    globalThis.logger.log(
+        `[Create Contest Folder] Creating folder with ${problems.length} problems`,
+    );
+    globalThis.logger.log(
+        `[Create Contest Folder] Problems: ${problems
+            .map((p) => `${p.name} (${p.url})`)
+            .join(', ')}`,
+    );
+
+    // Sort problems by their index (A, B, C, etc.)
+    // If URL doesn't have index, try to extract from problem name or use alphabetical order
+    const sortedProblems = problems.sort((a, b) => {
+        // Extract problem index from URL (e.g., /problem/A, /problem/B)
+        const getIndex = (url: string, name: string): string => {
+            const urlMatch = url.match(/\/problem\/([A-Z])/);
+            if (urlMatch) {
+                return urlMatch[1];
+            }
+            // Try to extract from name (e.g., "A. Problem Name" -> "A")
+            const nameMatch = name.match(/^([A-Z])\.?\s/);
+            if (nameMatch) {
+                return nameMatch[1];
+            }
+            return '';
+        };
+        const indexA = getIndex(a.url, a.name);
+        const indexB = getIndex(b.url, b.name);
+        if (indexA && indexB) {
+            return indexA.localeCompare(indexB);
+        }
+        // If no index, sort alphabetically by name
+        return a.name.localeCompare(b.name);
+    });
+
+    globalThis.logger.log(
+        `[Create Contest Folder] Sorted problems: ${sortedProblems
+            .map((p) => p.name)
+            .join(', ')}`,
+    );
+
+    for (const problem of sortedProblems) {
+        // Extract problem index from URL (e.g., /problem/A -> A)
+        let urlMatch = problem.url.match(/\/problem\/([A-Z])/);
+        let problemIndex = urlMatch ? urlMatch[1] : '';
+
+        // If no index from URL, try to extract from problem name (e.g., "A. Problem Name")
+        if (!problemIndex) {
+            const nameMatch = problem.name.match(/^([A-Z])\.?\s/);
+            if (nameMatch) {
+                problemIndex = nameMatch[1];
+            } else {
+                // Fallback: use first letter of problem name or sequential letter
+                problemIndex = problem.name.charAt(0).toUpperCase();
+                if (!/^[A-Z]$/.test(problemIndex)) {
+                    // Use sequential letters if name doesn't start with A-Z
+                    const index = sortedProblems.indexOf(problem);
+                    problemIndex = String.fromCharCode(65 + index); // A, B, C, etc.
+                }
+            }
+        }
+
+        if (!problemIndex) {
+            problemIndex = 'X';
+        }
+
+        globalThis.logger.log(
+            `[Create Contest Folder] Creating problem ${problem.name} with index ${problemIndex}`,
+        );
+
+        const problemPath = path.join(contestPath, `${problemIndex}.py`);
         fs.writeFileSync(
             problemPath,
-            TEMPLATE
-                .replace("{contest}", name)
-                .replace("{time}", timeString)
-                .replace("{problem}", result[keys[i]])
+            TEMPLATE.replace('{contest}', name)
+                .replace('{time}', timeString)
+                .replace('{problem}', problem.name),
         );
-        const problemName = result[keys[i]];
-        const problem = await getProblemInfo(contestId, keys[i], problemName);
+
         problem.srcPath = problemPath;
         saveProblem(problemPath, problem);
-        vscode.window.showInformationMessage(`Problem <${problemName}> created`);
+        vscode.window.showInformationMessage(
+            `Problem <${problem.name}> (${problemIndex}) created`,
+        );
     }
+
     await wait(100);
+    return contestPath;
 }
 
 export async function createContest() {
-    const contestId = await vscode.window.showInputBox({ prompt: 'Enter Codeforces Contest ID' });
+    const contestId = await vscode.window.showInputBox({
+        prompt: 'Enter Codeforces Contest ID',
+    });
     if (contestId && contestId.trim()) {
         try {
             const { name, result } = await getContestInfo(contestId);
-            const workspacePath = getWorkspacePath();
-            if (workspacePath === undefined) {
+            const expectedCount = Object.keys(result).length;
+
+            // Show detailed instructions to user
+            const instructions = [
+                `Contest: ${name}`,
+                `Expected problems: ${expectedCount}`,
+                ``,
+                `📋 INSTRUCTIONS:`,
+                `1. Open: https://codeforces.com/contest/${contestId}/problems`,
+                `2. Click Competitive Companion icon on each problem (A, B, C, etc.)`,
+                `3. VS Code will collect problems automatically`,
+                ``,
+                `⏳ Waiting for ${expectedCount} problems...`,
+            ].join('\n');
+
+            // Show instructions in a more prominent way
+            await vscode.window.showInformationMessage(instructions, {
+                modal: false,
+            });
+
+            // Also show a status bar message
+            vscode.window.setStatusBarMessage(
+                `Waiting for ${expectedCount} problems from Competitive Companion...`,
+                30000,
+            );
+
+            // Start collecting problems from Competitive Companion
+            globalThis.logger.log(
+                `[Create Contest] Starting collection for contest ${contestId}, expecting ${expectedCount} problems`,
+            );
+
+            const companionProblems = await startContestProblemCollection(
+                contestId,
+                expectedCount,
+            );
+
+            globalThis.logger.log(
+                `[Create Contest] Collection complete. Received ${companionProblems.length} problems`,
+            );
+            globalThis.logger.log(
+                `[Create Contest] Received problems:`,
+                companionProblems.map((p) => `${p.name} (${p.url})`).join(', '),
+            );
+
+            // Mark that we're processing the contest to prevent race conditions
+            // This prevents any late-arriving problems from creating files
+            setProcessingContest(true);
+
+            if (companionProblems.length === 0) {
+                vscode.window.showErrorMessage(
+                    'No problems received from Competitive Companion. Please make sure you have the extension installed and click on problem pages.',
+                );
+                stopContestProblemCollection();
                 return;
             }
-            const safeContestName = name.replace(ILLEGAL_CHARS, '');
-            const contestPath = path.join(workspacePath, safeContestName);
+
+            // Convert Competitive Companion format to our Problem format
+            globalThis.logger.log(
+                '[Create Contest] Converting problems to internal format',
+            );
+            const problems = companionProblems.map(
+                (companionProblem, index) => {
+                    globalThis.logger.log(
+                        `[Create Contest] Converting problem ${index + 1}: ${
+                            companionProblem.name
+                        }`,
+                    );
+                    const converted = convertCompanionProblem(companionProblem);
+                    globalThis.logger.log(
+                        `[Create Contest] Converted problem has ${converted.tests.length} test cases`,
+                    );
+                    return converted;
+                },
+            );
+
+            if (problems.length < expectedCount) {
+                const proceed = await vscode.window.showWarningMessage(
+                    `Only received ${problems.length} out of ${expectedCount} problems. Continue anyway?`,
+                    'Yes',
+                    'No',
+                );
+                if (proceed !== 'Yes') {
+                    stopContestProblemCollection();
+                    return;
+                }
+            }
+
+            const workspacePath = getWorkspacePath();
+            if (workspacePath === undefined) {
+                stopContestProblemCollection();
+                return;
+            }
+
+            globalThis.logger.log(
+                `[Create Contest] About to create contest folder with ${problems.length} problems`,
+            );
+            globalThis.logger.log(
+                `[Create Contest] Problems to create: ${problems
+                    .map((p) => p.name)
+                    .join(', ')}`,
+            );
+
             closeAllFiles();
-            await createContestFolder(contestId, name, result);
-            const paths = [];
-            for (let key of Object.keys(result)) {
-                paths.push(path.join(contestPath, `${key}.py`));
+            const contestPath = await createContestFolderFromCompanion(
+                contestId,
+                name,
+                problems,
+                result,
+            );
+
+            globalThis.logger.log(
+                `[Create Contest] Contest folder created at: ${contestPath}`,
+            );
+
+            if (contestPath) {
+                // Open all problem files
+                const paths: string[] = [];
+                for (const problem of problems) {
+                    if (problem.srcPath) {
+                        paths.push(problem.srcPath);
+                    }
+                }
+
+                const promises = paths.map((path) => openFileLocked(path));
+                await Promise.all(promises);
+                if (paths.length > 0) {
+                    openFileLocked(paths[0]);
+                }
+
+                vscode.window.showInformationMessage(
+                    `Contest <${name}> initialized with ${problems.length} problems`,
+                );
             }
-            const promises = [];
-            for (let i = 0; i < paths.length; i++) {
-                promises.push(openFileLocked(paths[i]));
-            }
-            await Promise.all(promises);
-            openFileLocked(paths[0]);
-            vscode.window.showInformationMessage(`Contest <${name}> initialized`);
+
+            stopContestProblemCollection();
         } catch (error) {
-            vscode.window.showErrorMessage(`Failed to fetch contest data: ${error}`);
+            stopContestProblemCollection();
+            vscode.window.showErrorMessage(
+                `Failed to fetch contest data: ${error}`,
+            );
         }
     }
 }

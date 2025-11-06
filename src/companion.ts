@@ -13,6 +13,7 @@ import {
     getMenuChoices,
     getDefaultLanguageTemplateFileLocation,
 } from './preferences';
+import { DEFAULT_MEMORY_LIMIT, DEFAULT_TIME_LIMIT } from './constants';
 import { getProblemName } from './submit';
 import { spawn } from 'child_process';
 import { getJudgeViewProvider } from './extension';
@@ -23,6 +24,193 @@ import os from 'os';
 const emptyResponse: CphEmptyResponse = { empty: true };
 let savedResponse: CphEmptyResponse | CphSubmitResponse = emptyResponse;
 const COMPANION_LOGGING = false;
+
+// Store problems received from Competitive Companion for contest creation
+// Note: For contest collection, we store raw Competitive Companion format (not converted Problem)
+let contestProblemsStore: Map<string, any[]> = new Map();
+let contestCreationListener: ((problem: any) => void) | null = null;
+// Track if we're in the middle of processing a contest collection
+// This prevents race conditions where problems might arrive during processing
+let isProcessingContest = false;
+
+export const startContestProblemCollection = (
+    contestId: string,
+    expectedCount: number,
+): Promise<any[]> => {
+    return new Promise((resolve) => {
+        // Store raw Competitive Companion format problems
+        const problems: any[] = [];
+        const contestKey = `contest-${contestId}`;
+        contestProblemsStore.set(contestKey, problems);
+
+        // Set up listener - receives raw Competitive Companion format
+        contestCreationListener = (companionProblem: any) => {
+            globalThis.logger.log(
+                '[Contest Collection] Received problem from Competitive Companion',
+            );
+            globalThis.logger.log(
+                '[Contest Collection] Problem data:',
+                JSON.stringify(companionProblem, null, 2),
+            );
+            globalThis.logger.log(
+                `[Contest Collection] Problem URL: ${companionProblem.url}`,
+            );
+            globalThis.logger.log(
+                `[Contest Collection] Problem name: ${companionProblem.name}`,
+            );
+            globalThis.logger.log(
+                `[Contest Collection] Test cases: ${
+                    companionProblem.tests?.length || 0
+                }`,
+            );
+            globalThis.logger.log(
+                `[Contest Collection] Memory limit: ${companionProblem.memoryLimit}MB`,
+            );
+            globalThis.logger.log(
+                `[Contest Collection] Time limit: ${companionProblem.timeLimit}ms`,
+            );
+
+            // Check if this problem belongs to the contest
+            // Match both individual problem URLs (/contest/2167/problem/A)
+            // and contest problems page (/contest/2167/problems)
+            const problemUrl = companionProblem.url;
+            const isIndividualProblem = problemUrl.includes(
+                `/contest/${contestId}/problem/`,
+            );
+            const isContestProblemsPage = problemUrl.includes(
+                `/contest/${contestId}/problems`,
+            );
+
+            if (isIndividualProblem || isContestProblemsPage) {
+                globalThis.logger.log(
+                    `[Contest Collection] Problem matches contest ${contestId} (individual: ${isIndividualProblem}, contest page: ${isContestProblemsPage})`,
+                );
+
+                // Check if we already have this problem
+                // When clicking on contest problems page, all problems share the same URL
+                // So we prioritize checking by problem name first, then URL for individual problems
+                const existing = problems.find((p) => {
+                    // First check by name (most reliable for batch submissions)
+                    if (
+                        companionProblem.name &&
+                        p.name === companionProblem.name
+                    ) {
+                        return true;
+                    }
+                    // For individual problem pages, also check URL
+                    // But don't use URL matching for contest problems page (all problems share same URL)
+                    if (isIndividualProblem && p.url === problemUrl) {
+                        return true;
+                    }
+                    return false;
+                });
+                if (!existing) {
+                    problems.push(companionProblem);
+                    contestProblemsStore.set(contestKey, problems);
+
+                    globalThis.logger.log(
+                        `[Contest Collection] Added problem ${companionProblem.name} (${problems.length}/${expectedCount})`,
+                    );
+                    globalThis.logger.log(
+                        `[Contest Collection] Current problems: ${problems
+                            .map((p) => p.name)
+                            .join(', ')}`,
+                    );
+
+                    vscode.window.showInformationMessage(
+                        `Received problem ${companionProblem.name} (${problems.length}/${expectedCount})`,
+                    );
+
+                    // If we have all problems, resolve
+                    // NOTE: Don't clear contestCreationListener here - let stopContestProblemCollection() handle it
+                    // This prevents race conditions where additional problems might create files
+                    if (problems.length >= expectedCount) {
+                        globalThis.logger.log(
+                            `[Contest Collection] All ${expectedCount} problems collected!`,
+                        );
+                        globalThis.logger.log(
+                            `[Contest Collection] Collected problems: ${problems
+                                .map((p) => p.name)
+                                .join(', ')}`,
+                        );
+                        contestProblemsStore.delete(contestKey);
+                        // Use setTimeout to ensure all async operations complete before resolving
+                        setTimeout(() => {
+                            resolve(problems);
+                        }, 100);
+                    }
+                } else {
+                    globalThis.logger.log(
+                        `[Contest Collection] Problem ${companionProblem.name} already exists (URL: ${problemUrl}, existing: ${existing.name}), skipping`,
+                    );
+                }
+            } else {
+                globalThis.logger.log(
+                    `[Contest Collection] Problem URL ${problemUrl} does not match contest ${contestId}`,
+                );
+                // Don't process this problem - it doesn't belong to the contest
+                // The listener is still active, so we don't want to create files for non-matching problems
+            }
+        };
+
+        // Timeout after 5 minutes
+        // NOTE: Don't clear contestCreationListener here - let stopContestProblemCollection() handle it
+        setTimeout(() => {
+            contestProblemsStore.delete(contestKey);
+            if (problems.length > 0) {
+                resolve(problems);
+            } else {
+                resolve([]);
+            }
+        }, 300000); // 5 minutes
+    });
+};
+
+export const stopContestProblemCollection = () => {
+    globalThis.logger.log(
+        '[Contest Collection] Stopping contest problem collection',
+    );
+    contestCreationListener = null;
+    contestProblemsStore.clear();
+    // Reset processing flag after a short delay to allow any pending operations to complete
+    setTimeout(() => {
+        isProcessingContest = false;
+    }, 1000);
+};
+
+export const setProcessingContest = (processing: boolean) => {
+    isProcessingContest = processing;
+    globalThis.logger.log(
+        `[Contest Collection] Set processing flag to: ${processing}`,
+    );
+};
+
+/**
+ * Convert Competitive Companion format to our Problem format
+ * This is used for the normal flow when handling a single problem
+ */
+function convertCompanionDataToProblem(companionData: any): Problem {
+    // Map test cases from Competitive Companion format
+    const tests = (companionData.tests || []).map((test: any) => ({
+        input: test.input || '',
+        output: test.output || '',
+        id: randomId(),
+        original: true,
+    }));
+
+    const problem: Problem = {
+        name: companionData.name || '',
+        url: companionData.url || '',
+        interactive: companionData.interactive || false,
+        memoryLimit: companionData.memoryLimit || DEFAULT_MEMORY_LIMIT,
+        timeLimit: companionData.timeLimit || DEFAULT_TIME_LIMIT,
+        group: companionData.group || 'local',
+        tests: tests,
+        srcPath: '', // Will be set by handleNewProblem
+    };
+
+    return problem;
+}
 
 export const submitKattisProblem = (problem: Problem) => {
     globalThis.reporter.sendTelemetryEvent(telmetry.SUBMIT_TO_KATTIS);
@@ -106,15 +294,102 @@ export const setupCompanionServer = () => {
             req.on('close', function () {
                 try {
                     if (rawProblem == '') {
+                        globalThis.logger.log(
+                            '[Companion Server] Received empty request',
+                        );
                         return;
                     }
-                    const problem: Problem = JSON.parse(rawProblem);
+
+                    globalThis.logger.log(
+                        '[Companion Server] Received data from Competitive Companion',
+                    );
+                    globalThis.logger.log(
+                        '[Companion Server] Raw data length:',
+                        rawProblem.length,
+                    );
+                    globalThis.logger.log(
+                        '[Companion Server] Raw data (first 500 chars):',
+                        rawProblem.substring(0, 500),
+                    );
+
+                    // Parse raw Competitive Companion data
+                    const companionData: any = JSON.parse(rawProblem);
+
+                    globalThis.logger.log(
+                        '[Companion Server] Parsed problem successfully',
+                    );
+                    globalThis.logger.log(
+                        '[Companion Server] Problem name:',
+                        companionData.name,
+                    );
+                    globalThis.logger.log(
+                        '[Companion Server] Problem URL:',
+                        companionData.url,
+                    );
+                    globalThis.logger.log(
+                        '[Companion Server] Test cases count:',
+                        companionData.tests?.length || 0,
+                    );
+                    globalThis.logger.log(
+                        '[Companion Server] Full problem data:',
+                        JSON.stringify(companionData, null, 2),
+                    );
+
+                    // Check if Competitive Companion sent batch data (multiple problems)
+                    // Competitive Companion format includes a "batch" field with size > 1
+                    const batchSize = companionData.batch?.size || 1;
+                    const batchId = companionData.batch?.id || null;
+
+                    globalThis.logger.log(
+                        `[Companion Server] Batch info: size=${batchSize}, id=${batchId}`,
+                    );
+
+                    // Check if we're collecting problems for contest creation
+                    // This check should happen before any other processing to prevent files from being created
+                    if (contestCreationListener || isProcessingContest) {
+                        if (contestCreationListener) {
+                            globalThis.logger.log(
+                                '[Companion Server] Contest creation listener active, forwarding raw companion data',
+                            );
+                            globalThis.logger.log(
+                                `[Companion Server] Problem name: ${companionData.name}, URL: ${companionData.url}`,
+                            );
+                            // Pass raw Competitive Companion format to contest listener
+                            contestCreationListener(companionData);
+                        } else {
+                            globalThis.logger.log(
+                                `[Companion Server] Contest processing in progress, ignoring problem ${companionData.name} to prevent race condition`,
+                            );
+                        }
+                        // IMPORTANT: Return early to prevent normal flow from creating files
+                        return;
+                    }
+
+                    // Normal flow: handle new problem (only when NOT collecting for contest)
+                    globalThis.logger.log(
+                        '[Companion Server] Normal flow: handling new problem (no contest listener active)',
+                    );
+                    globalThis.logger.log(
+                        `[Companion Server] Creating file for problem: ${companionData.name}`,
+                    );
+                    // Normal flow: convert companion data to Problem format
+                    const problem =
+                        convertCompanionDataToProblem(companionData);
                     handleNewProblem(problem);
+
                     COMPANION_LOGGING &&
                         globalThis.logger.log(
                             'Companion server closed connection.',
                         );
                 } catch (e) {
+                    globalThis.logger.error(
+                        '[Companion Server] Error parsing problem:',
+                        e,
+                    );
+                    globalThis.logger.error(
+                        '[Companion Server] Raw data:',
+                        rawProblem,
+                    );
                     vscode.window.showErrorMessage(
                         `Error parsing problem from companion "${e}. Raw problem: '${rawProblem}'"`,
                     );
