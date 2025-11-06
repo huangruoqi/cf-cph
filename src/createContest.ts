@@ -20,32 +20,18 @@ async function openFileLocked(filePath: string) {
     }
 }
 
-const parseHTML = async (url: string, referrer: string) => {
-    const response = await fetch(url, {
-        "headers": {
-            "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-            "sec-ch-ua-arch": "\"arm\"",
-            "sec-ch-ua-bitness": "\"64\"",
-            "sec-ch-ua-full-version": "\"131.0.6778.265\"",
-            "sec-ch-ua-full-version-list": "\"Google Chrome\";v=\"131.0.6778.265\", \"Chromium\";v=\"131.0.6778.265\", \"Not_A Brand\";v=\"24.0.0.0\"",
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-model": "\"\"",
-            "sec-ch-ua-platform": "\"macOS\"",
-            "sec-ch-ua-platform-version": "\"15.2.0\"",
-            "upgrade-insecure-requests": "1"
+const parseHTML = async (url: string) => {
+    const proxy = "https://api.allorigins.win/raw?url=";
+    const response = await fetch(proxy + encodeURIComponent(url), {
+        headers: {
+            "Accept": "text/html",
         },
-        "referrer": referrer,
-        "referrerPolicy": "strict-origin-when-cross-origin",
-        "body": null,
-        "method": "GET",
-        "mode": "cors",
-        "credentials": "omit"
     });
-    if (response.ok) {
-        const text = await response.text();
-        return cheerio.load(text);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch: ${response.statusText}`);
     }
-    throw Error("Failed to fetch " + url);
+    const text = await response.text();
+    return cheerio.load(text);
 };
 
 function getLAFmtTime() {
@@ -84,7 +70,7 @@ function wait(ms: number) {
 
 async function getContestInfo(contestId: string) {
     const url = `https://codeforces.com/contest/${contestId}`;
-    const $ = await parseHTML(url, url);
+    const $ = await parseHTML(url);
     const result: Record<string, string> = {};
     const contestName = $(".rtable a").first().text().trim();
     $('.problems tr').slice(1).each((_, element) => {
@@ -97,8 +83,7 @@ async function getContestInfo(contestId: string) {
 
 async function getProblemInfo(contestId: string, problem: string, name: string) {
     const url = `https://codeforces.com/contest/${contestId}/problem/${problem}`
-    const rurl = `https://codeforces.com/contest/${contestId}`;
-    const $ = await parseHTML(url, rurl);
+    const $ = await parseHTML(url);
     const result: Problem = {
         name: name,
         url: url,
