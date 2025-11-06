@@ -21,10 +21,10 @@ async function openFileLocked(filePath: string) {
 }
 
 const parseHTML = async (url: string) => {
-    const proxy = "https://api.allorigins.win/raw?url=";
-    const response = await fetch(proxy + encodeURIComponent(url), {
+    const response = await fetch(url, {
         headers: {
             "Accept": "text/html",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", // Pretend browser to avoid blocks
         },
     });
     if (!response.ok) {
@@ -37,13 +37,13 @@ const parseHTML = async (url: string) => {
 function getLAFmtTime() {
     const now = new Date().toLocaleString("en-US", {
         timeZone: "America/Los_Angeles",
-        hour12: false // 24-hour format; change to true for AM/PM
+        hour12: false
     });
     return now;
 }
 
 const parseMiliseconds = (time: string) => {
-    const words = time.split(' ')
+    const words = time.split(' ');
     if (words.length < 2) {
         return DEFAULT_TIME_LIMIT;
     }
@@ -51,10 +51,10 @@ const parseMiliseconds = (time: string) => {
         return Math.floor(parseFloat(words[0]) * 1000);
     }
     return DEFAULT_TIME_LIMIT;
-}
+};
 
 const parseMegabytes = (memory: string) => {
-    const words = memory.split(' ')
+    const words = memory.split(' ');
     if (words.length < 2) {
         return DEFAULT_MEMORY_LIMIT;
     }
@@ -62,27 +62,43 @@ const parseMegabytes = (memory: string) => {
         return Math.floor(parseFloat(words[0]));
     }
     return DEFAULT_MEMORY_LIMIT;
-}
+};
 
 function wait(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * Fetch contest info using the official Codeforces API
+ */
 async function getContestInfo(contestId: string) {
-    const url = `https://codeforces.com/contest/${contestId}`;
-    const $ = await parseHTML(url);
+    const apiUrl = `https://codeforces.com/api/contest.standings?contestId=${contestId}&from=1&count=1`;
+    const response = await fetch(apiUrl);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch contest info: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    if (data.status !== "OK") {
+        throw new Error(`Codeforces API error: ${data.comment}`);
+    }
+
+    const contestName = data.result.contest.name;
+    const problems = data.result.problems;
+
     const result: Record<string, string> = {};
-    const contestName = $(".rtable a").first().text().trim();
-    $('.problems tr').slice(1).each((_, element) => {
-        const problemId = $(element).find('.id a').text().trim();
-        const problemDesc = $(element).find('a').eq(1).text().trim();
-        result[problemId] = problemDesc;
-    });
-    return { name: contestName, result }
+    for (const p of problems) {
+        result[p.index] = p.name;
+    }
+
+    return { name: contestName, result };
 }
 
+/**
+ * Fetch and parse a problem page to extract test cases and limits.
+ */
 async function getProblemInfo(contestId: string, problem: string, name: string) {
-    const url = `https://codeforces.com/contest/${contestId}/problem/${problem}`
+    const url = `https://codeforces.com/contest/${contestId}/problem/${problem}`;
     const $ = await parseHTML(url);
     const result: Problem = {
         name: name,
@@ -93,7 +109,8 @@ async function getProblemInfo(contestId: string, problem: string, name: string) 
         group: 'local',
         tests: [],
         srcPath: ''
-    }
+    };
+
     const inputList: string[] = [];
     const outputList: string[] = [];
 
@@ -128,12 +145,14 @@ async function getProblemInfo(contestId: string, problem: string, name: string) 
             outputList.push(s as string);
         });
     });
+
     result.tests = inputList.map((input, i) => ({
         input,
         output: outputList[i],
         id: i,
         original: true,
     }));
+
     return result;
 }
 
@@ -143,7 +162,6 @@ function getWorkspacePath() {
         vscode.window.showErrorMessage("No workspace folder is open.");
         return;
     }
-
     return workspaceFolders[0].uri.fsPath;
 }
 
@@ -159,7 +177,7 @@ async function createContestFolder(contestId: string, name: string, result: Reco
         vscode.window.showErrorMessage(`Contest folder already exists: ${contestPath}`);
         const res = await vscode.window.showInputBox({ prompt: 'Enter `yes` to reinitialize...' });
         if (res !== 'yes') {
-            return
+            return;
         }
         fs.rmdirSync(contestPath, { recursive: true });
     }
