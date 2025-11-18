@@ -45,11 +45,6 @@
                 "command": "cph.submitToCodeForces",
                 "title": "Submit to CodeForces",
                 "icon": "dist/static/play.png"
-            },
-            {
-                "command": "cph.create",
-                "title": "Create Contest",
-                "icon": "dist/static/play.png"
             }
         ],
         "keybindings": [
