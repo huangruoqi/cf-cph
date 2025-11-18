@@ -78,6 +78,9 @@ class ContestProcessingQueue {
 
 const contestProcessingQueue = new ContestProcessingQueue();
 
+// Track problems created for each contest to open them all at once
+const contestProblemsMap: Map<string, Problem[]> = new Map();
+
 export const startContestProblemCollection = (
     contestId: string,
     expectedCount: number,
@@ -633,12 +636,35 @@ const normalizeProblemName = (problem: Problem): void => {
 };
 
 /**
+ * Extract contest ID from problem URL.
+ */
+const extractContestId = (url: string): string | null => {
+    const match = url.match(/\/contest\/(\d+)/);
+    return match ? match[1] : null;
+};
+
+/**
+ * Format current time as a readable string.
+ */
+const getCurrentTimeString = (): string => {
+    const now = new Date();
+    return now.toLocaleString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+};
+
+/**
  * Create and save the problem file with template if needed.
  */
 const createProblemFile = async (
     srcPath: string,
     problemFileName: string,
     ext: string,
+    problem: Problem,
 ): Promise<void> => {
     if (!existsSync(srcPath)) {
         globalThis.logger.log(
@@ -671,13 +697,119 @@ const createProblemFile = async (
 
     let templateContents = readFileSync(templateLocation).toString();
 
+    // Replace template placeholders
+    // {contest} - contest name or ID
+    const contestId = extractContestId(problem.url);
+    const contestName =
+        problem.group || (contestId ? `Contest ${contestId}` : 'Practice');
+    templateContents = templateContents.replace(/{contest}/g, contestName);
+
+    // {problem} - problem name
+    templateContents = templateContents.replace(/{problem}/g, problem.name);
+
+    // {time} - current time
+    const timeString = getCurrentTimeString();
+    templateContents = templateContents.replace(/{time}/g, timeString);
+
+    // Java-specific replacement
     if (ext === 'java') {
         const className = path.basename(problemFileName, '.java');
-        templateContents = templateContents.replace('CLASS_NAME', className);
+        templateContents = templateContents.replace(/CLASS_NAME/g, className);
     }
 
     writeFileSync(srcPath, templateContents);
 };
+
+/**
+ * Open a file with locked tab (not in preview mode).
+ */
+async function openFileLocked(filePath: string): Promise<void> {
+    try {
+        const uri = vscode.Uri.file(filePath);
+        const document = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+        globalThis.logger.error(`Error opening file ${filePath}:`, error);
+        vscode.window.showErrorMessage(`Error opening file: ${error}`);
+    }
+}
+
+/**
+ * Close all open editor tabs.
+ */
+export function closeAllFiles(): void {
+    vscode.commands.executeCommand('workbench.action.closeAllEditors');
+}
+
+// Track pending timeouts for each contest to avoid multiple openings
+const contestOpenTimeouts: Map<string, NodeJS.Timeout> = new Map();
+
+/**
+ * Extract problem index (A, B, C, etc.) from problem name or path for sorting.
+ */
+const getProblemIndexForSorting = (problem: Problem): string => {
+    // Try to extract from problem name (e.g., "A. Problem Name" -> "A")
+    const nameMatch = problem.name.match(/^([A-Z])\.?\s/);
+    if (nameMatch) {
+        return nameMatch[1];
+    }
+
+    // Try to extract from filename (e.g., "A.py" -> "A")
+    if (problem.srcPath) {
+        const fileName = path.basename(problem.srcPath);
+        const fileMatch = fileName.match(/^([A-Z])\./);
+        if (fileMatch) {
+            return fileMatch[1];
+        }
+    }
+
+    // Fallback: use problem name for sorting
+    return problem.name;
+};
+
+/**
+ * Open all problem files for a contest and show notification.
+ * Files are opened in order (A, B, C, etc.) to ensure tabs appear correctly.
+ */
+async function openContestProblems(
+    contestName: string,
+    problems: Problem[],
+): Promise<void> {
+    // Filter and sort problems by their index (A, B, C, etc.)
+    const problemsWithPaths = problems.filter((p) => p.srcPath);
+    const sortedProblems = problemsWithPaths.sort((a, b) => {
+        const indexA = getProblemIndexForSorting(a);
+        const indexB = getProblemIndexForSorting(b);
+        return indexA.localeCompare(indexB);
+    });
+
+    if (sortedProblems.length === 0) {
+        return;
+    }
+
+    // Close all existing tabs first
+    closeAllFiles();
+
+    // Wait a bit for tabs to close
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Open all problem files sequentially to ensure tab order
+    // Opening sequentially ensures tabs appear in the correct order
+    for (const problem of sortedProblems) {
+        if (problem.srcPath) {
+            await openFileLocked(problem.srcPath);
+        }
+    }
+
+    // Focus on the first file
+    if (sortedProblems[0]?.srcPath) {
+        await openFileLocked(sortedProblems[0].srcPath);
+    }
+
+    vscode.window.showInformationMessage(
+        `Contest <${contestName}> initialized with ${sortedProblems.length} problems`,
+    );
+}
 
 /**
  * Process a problem, queueing it if it's from a contest problems page.
@@ -695,10 +827,38 @@ const processProblem = async (problem: Problem): Promise<void> => {
             globalThis.logger.log(
                 `[Companion Server] Processing queued problem ${problem.name} for contest ${contestId}`,
             );
-            await handleNewProblem(problem);
+            await handleNewProblem(problem, true); // Skip individual file opening for contest problems
             globalThis.logger.log(
                 `[Companion Server] Finished processing problem ${problem.name} for contest ${contestId}`,
             );
+
+            // Track this problem for the contest
+            if (!contestProblemsMap.has(contestId)) {
+                contestProblemsMap.set(contestId, []);
+            }
+            const contestProblems = contestProblemsMap.get(contestId)!;
+            contestProblems.push(problem);
+
+            // Clear any existing timeout for this contest
+            const existingTimeout = contestOpenTimeouts.get(contestId);
+            if (existingTimeout) {
+                clearTimeout(existingTimeout);
+            }
+
+            // Set a new timeout to open all files after a delay
+            // This batches the opening after all problems are likely done processing
+            const timeout = setTimeout(async () => {
+                const problems = contestProblemsMap.get(contestId);
+                if (problems && problems.length > 0) {
+                    const contestName = problem.group || `Contest ${contestId}`;
+                    await openContestProblems(contestName, problems);
+                    // Clear the map and timeout after opening to avoid reopening
+                    contestProblemsMap.delete(contestId);
+                    contestOpenTimeouts.delete(contestId);
+                }
+            }, 2000); // Wait 2 seconds after last problem to batch open
+
+            contestOpenTimeouts.set(contestId, timeout);
         });
     } else {
         // Not a contest problems page, process immediately
@@ -708,8 +868,13 @@ const processProblem = async (problem: Problem): Promise<void> => {
 
 /**
  * Handle the `problem` sent by Competitive Companion, such as showing the webview, opening an editor, managing layout etc.
+ * @param problem The problem to handle
+ * @param skipOpenFile If true, skip opening the file individually (useful for contest problems that will be opened together)
  */
-const handleNewProblem = async (problem: Problem): Promise<void> => {
+const handleNewProblem = async (
+    problem: Problem,
+    skipOpenFile = false,
+): Promise<void> => {
     globalThis.reporter.sendTelemetryEvent(telmetry.GET_PROBLEM_FROM_COMPANION);
 
     // If webview may be focused, close it, to prevent layout bug.
@@ -754,7 +919,7 @@ const handleNewProblem = async (problem: Problem): Promise<void> => {
         id: randomId(),
     }));
 
-    await createProblemFile(srcPath, fileName, extn);
+    await createProblemFile(srcPath, fileName, extn, problem);
 
     globalThis.logger.log(
         `[Handle New Problem] Saving problem metadata to .cph folder`,
@@ -764,8 +929,11 @@ const handleNewProblem = async (problem: Problem): Promise<void> => {
         `[Handle New Problem] Successfully saved problem ${problem.name}`,
     );
 
-    const doc = await vscode.workspace.openTextDocument(srcPath);
-    await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+    // Only open file individually if not skipping (for contest problems, we open them all together)
+    if (!skipOpenFile) {
+        const doc = await vscode.workspace.openTextDocument(srcPath);
+        await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+    }
 
     getJudgeViewProvider().extensionToJudgeViewMessage({
         command: 'new-problem',
