@@ -5,7 +5,7 @@
     "license": "GPL-3.0-or-later",
     "icon": "icon.png",
     "publisher": "Ruoqi",
-    "version": "2078.0.2",
+    "version": "2078.0.4",
     "engines": {
         "vscode": "^1.52.0"
     },
