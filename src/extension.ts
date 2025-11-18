@@ -37,7 +37,6 @@ import JudgeViewProvider from './webview/JudgeView';
 import { getRetainWebviewContextPref } from './preferences';
 import TelemetryReporter from '@vscode/extension-telemetry';
 import config from './config';
-import { createContest } from './createContest';
 import { setupCompanionServer } from './companion';
 
 let judgeViewProvider: JudgeViewProvider;
@@ -74,9 +73,6 @@ const registerCommands = (context: vscode.ExtensionContext) => {
             submitToKattis();
         },
     );
-    const disposable5 = vscode.commands.registerCommand('cph.create', () => {
-        createContest();
-    });
 
     judgeViewProvider = new JudgeViewProvider(context.extensionUri);
 
@@ -95,7 +91,6 @@ const registerCommands = (context: vscode.ExtensionContext) => {
     context.subscriptions.push(disposable2);
     context.subscriptions.push(disposable3);
     context.subscriptions.push(disposable4);
-    context.subscriptions.push(disposable5);
     globalThis.reporter = new TelemetryReporter(config.telemetryKey);
     context.subscriptions.push(globalThis.reporter);
 };

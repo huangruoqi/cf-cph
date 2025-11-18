@@ -4,7 +4,7 @@ import { Problem, CphSubmitResponse, CphEmptyResponse } from './types';
 import { saveProblem } from './parser';
 import * as vscode from 'vscode';
 import path from 'path';
-import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { isCodeforcesUrl, randomId } from './utils';
 import {
     getDefaultLangPref,
@@ -32,6 +32,51 @@ let contestCreationListener: ((problem: any) => void) | null = null;
 // Track if we're in the middle of processing a contest collection
 // This prevents race conditions where problems might arrive during processing
 let isProcessingContest = false;
+
+/**
+ * Queue manager to ensure sequential processing of problems from the same contest.
+ * Prevents race conditions when multiple problems arrive concurrently.
+ */
+class ContestProcessingQueue {
+    private queues: Map<string, Promise<void>> = new Map();
+
+    /**
+     * Queue a problem for processing. If a problem from the same contest is already
+     * being processed, this will wait for it to complete before processing.
+     */
+    async queue(
+        contestId: string,
+        processFn: () => Promise<void>,
+    ): Promise<void> {
+        const previousPromise = this.queues.get(contestId) || Promise.resolve();
+
+        const currentPromise = previousPromise
+            .then(async () => {
+                await processFn();
+            })
+            .catch((error) => {
+                globalThis.logger.error(
+                    `[Contest Queue] Error processing problem for contest ${contestId}:`,
+                    error,
+                );
+            });
+
+        this.queues.set(contestId, currentPromise);
+
+        // Clean up queue entry after processing completes
+        currentPromise.finally(() => {
+            setTimeout(() => {
+                if (this.queues.get(contestId) === currentPromise) {
+                    this.queues.delete(contestId);
+                }
+            }, 5000);
+        });
+
+        return currentPromise;
+    }
+}
+
+const contestProcessingQueue = new ContestProcessingQueue();
 
 export const startContestProblemCollection = (
     contestId: string,
@@ -280,10 +325,141 @@ export const storeSubmitProblem = (problem: Problem) => {
     globalThis.logger.log('Stored savedResponse', savedResponse);
 };
 
+/**
+ * Handle a single problem from Competitive Companion data.
+ */
+const handleCompanionProblem = async (companionData: any): Promise<void> => {
+    globalThis.logger.log('[Companion Server] Parsed problem successfully');
+    globalThis.logger.log(
+        '[Companion Server] Problem name:',
+        companionData.name,
+    );
+    globalThis.logger.log('[Companion Server] Problem URL:', companionData.url);
+    globalThis.logger.log(
+        '[Companion Server] Test cases count:',
+        companionData.tests?.length || 0,
+    );
+
+    const batchSize = companionData.batch?.size || 1;
+    const batchId = companionData.batch?.id || null;
+    globalThis.logger.log(
+        `[Companion Server] Batch info: size=${batchSize}, id=${batchId}`,
+    );
+
+    // Check if we're collecting problems for contest creation
+    if (contestCreationListener || isProcessingContest) {
+        if (contestCreationListener) {
+            globalThis.logger.log(
+                '[Companion Server] Contest creation listener active, forwarding raw companion data',
+            );
+            contestCreationListener(companionData);
+        } else {
+            globalThis.logger.log(
+                `[Companion Server] Contest processing in progress, ignoring problem ${companionData.name} to prevent race condition`,
+            );
+        }
+        return;
+    }
+
+    // Normal flow: handle new problem
+    globalThis.logger.log(
+        '[Companion Server] Normal flow: handling new problem',
+    );
+    const problem = convertCompanionDataToProblem(companionData);
+    await processProblem(problem);
+};
+
+/**
+ * Handle an array of problems from Competitive Companion.
+ */
+const handleCompanionProblemArray = async (
+    companionDataArray: any[],
+): Promise<void> => {
+    globalThis.logger.log(
+        `[Companion Server] Received array of ${companionDataArray.length} problems`,
+    );
+
+    for (let i = 0; i < companionDataArray.length; i++) {
+        const problemData = companionDataArray[i];
+        globalThis.logger.log(
+            `[Companion Server] Processing problem ${i + 1}/${
+                companionDataArray.length
+            }: ${problemData.name}`,
+        );
+
+        // Check if we're collecting problems for contest creation
+        if (contestCreationListener || isProcessingContest) {
+            if (contestCreationListener) {
+                contestCreationListener(problemData);
+            }
+            continue;
+        }
+
+        // Normal flow: convert and handle this problem
+        const problem = convertCompanionDataToProblem(problemData);
+        await processProblem(problem);
+    }
+};
+
+/**
+ * Process incoming Competitive Companion request.
+ */
+const processCompanionRequest = async (rawProblem: string): Promise<void> => {
+    if (rawProblem === '') {
+        globalThis.logger.log('[Companion Server] Received empty request');
+        return;
+    }
+
+    globalThis.logger.log(
+        '[Companion Server] Received data from Competitive Companion',
+    );
+    globalThis.logger.log(
+        '[Companion Server] Raw data length:',
+        rawProblem.length,
+    );
+
+    const companionData: any = JSON.parse(rawProblem);
+
+    // Check if Competitive Companion sent an array of problems
+    if (Array.isArray(companionData)) {
+        await handleCompanionProblemArray(companionData);
+        return;
+    }
+
+    // Single problem
+    await handleCompanionProblem(companionData);
+};
+
+/**
+ * Handle HTTP response for companion requests.
+ */
+const handleCompanionResponse = (
+    res: http.ServerResponse,
+    headers: http.IncomingHttpHeaders,
+): void => {
+    res.write(JSON.stringify(savedResponse));
+
+    if (headers['cph-submit'] === 'true') {
+        COMPANION_LOGGING &&
+            globalThis.logger.log(
+                'Request was from the cph-submit extension; sending savedResponse and clearing it',
+                savedResponse,
+            );
+
+        if (savedResponse.empty !== true) {
+            getJudgeViewProvider().extensionToJudgeViewMessage({
+                command: 'submit-finished',
+            });
+        }
+        savedResponse = emptyResponse;
+    }
+
+    res.end();
+};
+
 export const setupCompanionServer = () => {
     try {
         const server = http.createServer((req, res) => {
-            const { headers } = req;
             let rawProblem = '';
 
             req.on('data', (chunk) => {
@@ -291,92 +467,10 @@ export const setupCompanionServer = () => {
                     globalThis.logger.log('Companion server got data');
                 rawProblem += chunk;
             });
-            req.on('close', function () {
+
+            req.on('close', async () => {
                 try {
-                    if (rawProblem == '') {
-                        globalThis.logger.log(
-                            '[Companion Server] Received empty request',
-                        );
-                        return;
-                    }
-
-                    globalThis.logger.log(
-                        '[Companion Server] Received data from Competitive Companion',
-                    );
-                    globalThis.logger.log(
-                        '[Companion Server] Raw data length:',
-                        rawProblem.length,
-                    );
-                    globalThis.logger.log(
-                        '[Companion Server] Raw data (first 500 chars):',
-                        rawProblem.substring(0, 500),
-                    );
-
-                    // Parse raw Competitive Companion data
-                    const companionData: any = JSON.parse(rawProblem);
-
-                    globalThis.logger.log(
-                        '[Companion Server] Parsed problem successfully',
-                    );
-                    globalThis.logger.log(
-                        '[Companion Server] Problem name:',
-                        companionData.name,
-                    );
-                    globalThis.logger.log(
-                        '[Companion Server] Problem URL:',
-                        companionData.url,
-                    );
-                    globalThis.logger.log(
-                        '[Companion Server] Test cases count:',
-                        companionData.tests?.length || 0,
-                    );
-                    globalThis.logger.log(
-                        '[Companion Server] Full problem data:',
-                        JSON.stringify(companionData, null, 2),
-                    );
-
-                    // Check if Competitive Companion sent batch data (multiple problems)
-                    // Competitive Companion format includes a "batch" field with size > 1
-                    const batchSize = companionData.batch?.size || 1;
-                    const batchId = companionData.batch?.id || null;
-
-                    globalThis.logger.log(
-                        `[Companion Server] Batch info: size=${batchSize}, id=${batchId}`,
-                    );
-
-                    // Check if we're collecting problems for contest creation
-                    // This check should happen before any other processing to prevent files from being created
-                    if (contestCreationListener || isProcessingContest) {
-                        if (contestCreationListener) {
-                            globalThis.logger.log(
-                                '[Companion Server] Contest creation listener active, forwarding raw companion data',
-                            );
-                            globalThis.logger.log(
-                                `[Companion Server] Problem name: ${companionData.name}, URL: ${companionData.url}`,
-                            );
-                            // Pass raw Competitive Companion format to contest listener
-                            contestCreationListener(companionData);
-                        } else {
-                            globalThis.logger.log(
-                                `[Companion Server] Contest processing in progress, ignoring problem ${companionData.name} to prevent race condition`,
-                            );
-                        }
-                        // IMPORTANT: Return early to prevent normal flow from creating files
-                        return;
-                    }
-
-                    // Normal flow: handle new problem (only when NOT collecting for contest)
-                    globalThis.logger.log(
-                        '[Companion Server] Normal flow: handling new problem (no contest listener active)',
-                    );
-                    globalThis.logger.log(
-                        `[Companion Server] Creating file for problem: ${companionData.name}`,
-                    );
-                    // Normal flow: convert companion data to Problem format
-                    const problem =
-                        convertCompanionDataToProblem(companionData);
-                    handleNewProblem(problem);
-
+                    await processCompanionRequest(rawProblem);
                     COMPANION_LOGGING &&
                         globalThis.logger.log(
                             'Companion server closed connection.',
@@ -395,29 +489,17 @@ export const setupCompanionServer = () => {
                     );
                 }
             });
-            res.write(JSON.stringify(savedResponse));
-            if (headers['cph-submit'] == 'true') {
-                COMPANION_LOGGING &&
-                    globalThis.logger.log(
-                        'Request was from the cph-submit extension; sending savedResponse and clearing it',
-                        savedResponse,
-                    );
 
-                if (savedResponse.empty != true) {
-                    getJudgeViewProvider().extensionToJudgeViewMessage({
-                        command: 'submit-finished',
-                    });
-                }
-                savedResponse = emptyResponse;
-            }
-            res.end();
+            handleCompanionResponse(res, req.headers);
         });
+
         server.listen(config.port);
         server.on('error', (err) => {
             vscode.window.showErrorMessage(
                 `Are multiple VSCode windows open? CPH will work on the first opened window. CPH server encountered an error: "${err.message}" , companion may not work.`,
             );
         });
+
         globalThis.logger.log(
             'Companion server listening on port',
             config.port,
@@ -428,72 +510,242 @@ export const setupCompanionServer = () => {
     }
 };
 
-export const getProblemFileName = (problem: Problem, ext: string) => {
+/**
+ * Get the filename for a problem based on its properties.
+ */
+export const getProblemFileName = (problem: Problem, ext: string): string => {
     if (isCodeforcesUrl(new URL(problem.url)) && useShortCodeForcesName()) {
         return `${getProblemName(problem.url)}.${ext}`;
-    } else {
-        globalThis.logger.log(
-            isCodeforcesUrl(new URL(problem.url)),
-            useShortCodeForcesName(),
-        );
+    }
 
-        const words = words_in_text(problem.name);
-        if (words === null) {
-            return `${problem.name.replace(/\W+/g, '_')}.${ext}`;
-        } else {
-            return `${words.join('_')}.${ext}`;
+    const words = words_in_text(problem.name);
+    if (words === null) {
+        return `${problem.name.replace(/\W+/g, '_')}.${ext}`;
+    }
+    return `${words.join('_')}.${ext}`;
+};
+
+/**
+ * Extract problem index (A, B, C, etc.) from problem name.
+ * Returns null if no index can be extracted.
+ */
+const extractProblemIndex = (problemName: string): string | null => {
+    const match = problemName.match(/^([A-Z])\.?\s/);
+    return match ? match[1] : null;
+};
+
+/**
+ * Get filename for a contest problem.
+ * For contest problems page, extracts the problem index (A, B, C, etc.) from the name.
+ */
+const getContestProblemFileName = (problem: Problem, ext: string): string => {
+    const problemIndex = extractProblemIndex(problem.name);
+    if (problemIndex) {
+        globalThis.logger.log(
+            `Extracted problem index ${problemIndex} from name: ${problem.name}`,
+        );
+        return `${problemIndex}.${ext}`;
+    }
+
+    // Fallback: use problem name if index extraction fails
+    globalThis.logger.log(
+        `Could not extract problem index from name: ${problem.name}, using full name`,
+    );
+    const words = words_in_text(problem.name);
+    if (words === null) {
+        return `${problem.name.replace(/\W+/g, '_')}.${ext}`;
+    }
+    return `${words.join('_')}.${ext}`;
+};
+
+/**
+ * Get the target folder and filename for a problem.
+ * Returns { targetFolder, fileName }.
+ */
+const getProblemPathInfo = (
+    problem: Problem,
+    workspaceFolder: string,
+    ext: string,
+): { targetFolder: string; fileName: string } => {
+    const contestMatch = problem.url.match(/\/contest\/(\d+)\/problems/);
+
+    if (!contestMatch) {
+        return {
+            targetFolder: workspaceFolder,
+            fileName: getProblemFileName(problem, ext),
+        };
+    }
+
+    const contestId = contestMatch[1];
+    const contestFolder = path.join(workspaceFolder, `contest-${contestId}`);
+
+    if (!existsSync(contestFolder)) {
+        globalThis.logger.log(`Creating contest folder: ${contestFolder}`);
+        mkdirSync(contestFolder, { recursive: true });
+    }
+
+    globalThis.logger.log(`Using contest folder for problem: ${contestFolder}`);
+
+    return {
+        targetFolder: contestFolder,
+        fileName: getContestProblemFileName(problem, ext),
+    };
+};
+
+/**
+ * Get the file extension for the problem based on user preferences.
+ */
+const getProblemExtension = async (): Promise<string | null> => {
+    const defaultLanguage = getDefaultLangPref();
+
+    if (defaultLanguage != null) {
+        // @ts-ignore
+        return config.extensions[defaultLanguage];
+    }
+
+    const allChoices = new Set(Object.keys(config.extensions));
+    const userChoices = getMenuChoices();
+    const choices = userChoices.filter((x) => allChoices.has(x));
+    const selected = await vscode.window.showQuickPick(choices);
+
+    if (!selected) {
+        vscode.window.showInformationMessage('Aborted creation of new file');
+        return null;
+    }
+
+    // @ts-ignore
+    return config.extensions[selected];
+};
+
+/**
+ * Normalize problem name for Kattis problems.
+ */
+const normalizeProblemName = (problem: Problem): void => {
+    try {
+        const url = new URL(problem.url);
+        if (url.hostname === 'open.kattis.com') {
+            const splitUrl = problem.url.split('/');
+            problem.name = splitUrl[splitUrl.length - 1];
         }
+    } catch (err) {
+        globalThis.logger.error('Error parsing problem URL:', err);
     }
 };
 
-/** Handle the `problem` sent by Competitive Companion, such as showing the webview, opening an editor, managing layout etc. */
-const handleNewProblem = async (problem: Problem) => {
+/**
+ * Create and save the problem file with template if needed.
+ */
+const createProblemFile = async (
+    srcPath: string,
+    problemFileName: string,
+    ext: string,
+): Promise<void> => {
+    if (!existsSync(srcPath)) {
+        globalThis.logger.log(
+            `[Handle New Problem] Creating new file: ${srcPath}`,
+        );
+        writeFileSync(srcPath, '');
+    } else {
+        globalThis.logger.log(
+            `[Handle New Problem] File already exists: ${srcPath}`,
+        );
+    }
+
+    const defaultLanguage = getDefaultLangPref();
+    if (!defaultLanguage) {
+        return;
+    }
+
+    const templateLocation = getDefaultLanguageTemplateFileLocation();
+    if (!templateLocation) {
+        return;
+    }
+
+    const templateExists = existsSync(templateLocation);
+    if (!templateExists) {
+        vscode.window.showErrorMessage(
+            `Template file does not exist: ${templateLocation}`,
+        );
+        return;
+    }
+
+    let templateContents = readFileSync(templateLocation).toString();
+
+    if (ext === 'java') {
+        const className = path.basename(problemFileName, '.java');
+        templateContents = templateContents.replace('CLASS_NAME', className);
+    }
+
+    writeFileSync(srcPath, templateContents);
+};
+
+/**
+ * Process a problem, queueing it if it's from a contest problems page.
+ */
+const processProblem = async (problem: Problem): Promise<void> => {
+    const contestMatch = problem.url.match(/\/contest\/(\d+)\/problems/);
+
+    if (contestMatch) {
+        const contestId = contestMatch[1];
+        globalThis.logger.log(
+            `[Companion Server] Queueing problem ${problem.name} for contest ${contestId}`,
+        );
+
+        await contestProcessingQueue.queue(contestId, async () => {
+            globalThis.logger.log(
+                `[Companion Server] Processing queued problem ${problem.name} for contest ${contestId}`,
+            );
+            await handleNewProblem(problem);
+            globalThis.logger.log(
+                `[Companion Server] Finished processing problem ${problem.name} for contest ${contestId}`,
+            );
+        });
+    } else {
+        // Not a contest problems page, process immediately
+        await handleNewProblem(problem);
+    }
+};
+
+/**
+ * Handle the `problem` sent by Competitive Companion, such as showing the webview, opening an editor, managing layout etc.
+ */
+const handleNewProblem = async (problem: Problem): Promise<void> => {
     globalThis.reporter.sendTelemetryEvent(telmetry.GET_PROBLEM_FROM_COMPANION);
+
     // If webview may be focused, close it, to prevent layout bug.
-    if (vscode.window.activeTextEditor == undefined) {
+    if (vscode.window.activeTextEditor === undefined) {
         getJudgeViewProvider().extensionToJudgeViewMessage({
             command: 'new-problem',
             problem: undefined,
         });
     }
+
     const folder = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
     if (folder === undefined) {
         vscode.window.showInformationMessage('Please open a folder first.');
         return;
     }
-    const defaultLanguage = getDefaultLangPref();
-    let extn: string;
 
-    if (defaultLanguage == null) {
-        const allChoices = new Set(Object.keys(config.extensions));
-        const userChoices = getMenuChoices();
-        const choices = userChoices.filter((x) => allChoices.has(x));
-        const selected = await vscode.window.showQuickPick(choices);
-        if (!selected) {
-            vscode.window.showInformationMessage(
-                'Aborted creation of new file',
-            );
-            return;
-        }
-        // @ts-ignore
-        extn = config.extensions[selected];
-    } else {
-        //@ts-ignore
-        extn = config.extensions[defaultLanguage];
+    const extn = await getProblemExtension();
+    if (!extn) {
+        return;
     }
-    let url: URL;
-    try {
-        url = new URL(problem.url);
-    } catch (err) {
-        globalThis.logger.error(err);
-        return null;
-    }
-    if (url.hostname == 'open.kattis.com') {
-        const splitUrl = problem.url.split('/');
-        problem.name = splitUrl[splitUrl.length - 1];
-    }
-    const problemFileName = getProblemFileName(problem, extn);
-    const srcPath = path.join(folder, problemFileName);
+
+    normalizeProblemName(problem);
+
+    const { targetFolder, fileName } = getProblemPathInfo(
+        problem,
+        folder,
+        extn,
+    );
+    const srcPath = path.join(targetFolder, fileName);
+
+    globalThis.logger.log(
+        `[Handle New Problem] Saving problem ${problem.name} to ${srcPath}`,
+    );
+    globalThis.logger.log(
+        `[Handle New Problem] Problem has ${problem.tests.length} test cases`,
+    );
 
     // Add fields absent in competitive companion.
     problem.srcPath = srcPath;
@@ -501,37 +753,20 @@ const handleNewProblem = async (problem: Problem) => {
         ...testcase,
         id: randomId(),
     }));
-    if (!existsSync(srcPath)) {
-        writeFileSync(srcPath, '');
-    }
+
+    await createProblemFile(srcPath, fileName, extn);
+
+    globalThis.logger.log(
+        `[Handle New Problem] Saving problem metadata to .cph folder`,
+    );
     saveProblem(srcPath, problem);
+    globalThis.logger.log(
+        `[Handle New Problem] Successfully saved problem ${problem.name}`,
+    );
+
     const doc = await vscode.workspace.openTextDocument(srcPath);
-
-    if (defaultLanguage) {
-        const templateLocation = getDefaultLanguageTemplateFileLocation();
-        if (templateLocation !== null) {
-            const templateExists = existsSync(templateLocation);
-            if (!templateExists) {
-                vscode.window.showErrorMessage(
-                    `Template file does not exist: ${templateLocation}`,
-                );
-            } else {
-                let templateContents =
-                    readFileSync(templateLocation).toString();
-
-                if (extn == 'java') {
-                    const className = path.basename(problemFileName, '.java');
-                    templateContents = templateContents.replace(
-                        'CLASS_NAME',
-                        className,
-                    );
-                }
-                writeFileSync(srcPath, templateContents);
-            }
-        }
-    }
-
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+
     getJudgeViewProvider().extensionToJudgeViewMessage({
         command: 'new-problem',
         problem,
